@@ -2025,6 +2025,9 @@
         <name>$PROJ_DIR$\dalimaster.c</name>
     </file>
     <file>
+        <name>$PROJ_DIR$\daliprotocol.c</name>
+    </file>
+    <file>
         <name>$PROJ_DIR$\dalitransfer.c</name>
     </file>
     <file>

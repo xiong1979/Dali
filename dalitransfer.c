@@ -1,11 +1,12 @@
 
 #include <stdint.h>
 
-typedef uint32_t FRAME;
+typedef uint32_t FORWARD;
+typedef uint16_t BACKWARD;
 
 typedef struct __forwardframe
 {
-  FRAME       Data;
+  FORWARD     Data;
   uint8_t     ToSend;
   uint8_t     Sent;
 }tsForwardFrame;
@@ -15,6 +16,9 @@ typedef struct __backwardframe
   uint16_t  Data;
   uint8_t   ToReceive;
   uint8_t   Received;
+  uint8_t   Valid;
+  uint8_t   Halfbits;
+  uint8_t   Bits;
 }tsBackwardFrame;
 
 typedef enum
@@ -25,21 +29,23 @@ typedef enum
 
 typedef enum tEvent;
 typedef int StateMachine;
-static StateMachine DaliSend;
-static StateMachine DalieRecv;
+
+static StateMachine DaliState;
+
+#define Dali_DispEvent(e)     DispatchEvent(DaliState, (e))
 
 #define STATE_TO(State)   
 
-void DaliSend_Idle(tEvent *e);
-void DaliSend_Start(tEvent *e);
-void DaliSend_SendFirstHalf(tEvent *e);
-void DaliSend_SendSecondHalf(tEvent *e);
-void DaliSend_SendEnd(tEvent *e);
+static void DaliSend_Idle(tEvent *e);
+static void DaliSend_Start(tEvent *e);
+static void DaliSend_SendFirstHalf(tEvent *e);
+static void DaliSend_SendSecondHalf(tEvent *e);
+static void DaliSend_SendEnd(tEvent *e);
 
-void DaliRecv_Idle(tEvent *e);
-void DaliRecv_Start(tEvent *e);
-void DaliRecv_RecvFirstHalf(tEvent *e);
-void DaliRecv_RecvSecondHalf(tEvent *e);
+static void DaliRecv_Idle(tEvent *e);
+static void DaliRecv_Start(tEvent *e);
+static void DaliRecv_RecvFirstHalf(tEvent *e);
+static void DaliRecv_RecvSecondHalf(tEvent *e);
 
 
 #define TIME_TE        416  // 416.67 us
@@ -48,42 +54,96 @@ void DaliRecv_RecvSecondHalf(tEvent *e);
 #define DALI_PIN_OUT_TOGGLE()
 #define DALI_PIN_IN()
 
-#define MostBit       ( 0x8000)
+#define MostBit       ( 1 < (sizeof(FORWARD) * 8 - 1))
 void DaliSend_StartTime(uint32_t  Time);
 void DaliSend_StopTime(void);
+
+typedef enum
+{
+  DALI_RECV_ERROR,
+  DALI_RECV_OK,
+};
+
+typedef struct __dali_status
+{
+  uint8_t     Re;
+}tsDaliStatus;
 
 tsForwardFrame      thisForwardFrame;
 tsBackwardFrame     thisBackWardFrame;
 uint8_t       subDaliStatus;
 
-void Dali_Send(FRAME Frame)
+//
+void Dali_Init(void)
 {
-    thisForwardFrame.Data = Frame;
-    
+  Dali_InitTimer();
+  STATE_INIT(Dali_Idle);
 }
-
+// 启动发送
+void Dali_Send(FORWARD Frame)
+{
+  thisForwardFrame.Data = Frame;  
+  
+  tEvent e;
+  
+  e.Id = E_Dali_Send;
+  
+  Dali_DispEvent(e);
+}
+// 启动接收
 void Dali_Recv(void)
 {
-  // 启动定时器，时间22TE，如果超过，说明dali input 没有来，dali错误
-  // 启动 dali input中断， 在中断里，设置定时器中断时间要50 TE, 大于22TE
+  tEvent e;
+  
+  e.Id = E_Dali_Recv;
+  
+  Dali_DispEvent(e);    
   
 }
 
-void DaliSend_Idle(tEvent *e)
+void Dali_InitTimer()
+{
+  
+}
+
+void Dali_StartTimer(uint32_t Time)
+{
+}
+
+void Dali_StopTimer()
+{
+}
+
+/// dali 定时器中断
+void DaliTimerISR(void)
+{
+  tEvent e;
+  
+  e.Id = E_Dali_TimeOut;
+  
+  Dali_DispEvent(e);
+}
+
+void Dali_Idle(tEvent *e)
 {
   switch(e->Id)
   {
-  case E_ENTRY:    
+  case E_ENTRY:
     break;
     
   case E_Dali_Send:
     STATE_TO(DaliSend_Start);
+    break;
+
+  case E_Dali_Recv:
+    STATE_TO(DaliRecv_WaitStart);
     break;
     
   case E_EXIT:
     break;
   }
 }
+
 void DaliSend_Start(tEvent *e)
 {
   switch(e->Id)
@@ -109,7 +169,7 @@ void DaliSend_SendFirstHalf(tEvent *e)
     {
       DALI_PIN_OUT_HIGH();
     }
-    DaliSend_StartTime(TIME_TE);
+    Dali_StartTimer(TIME_TE);
     break;
     
   case E_Dali_TimeOut:
@@ -117,7 +177,7 @@ void DaliSend_SendFirstHalf(tEvent *e)
     break;
     
   case E_EXIT:
-    DaliSend_StopTime();
+    Dali_StopTimer();
     break;
   }
 }
@@ -128,24 +188,24 @@ void DaliSend_SendSecondHalf(tEvent *e)
   case E_ENTRY:
     DALI_PIN_OUT_TOGGLE();
     
-     DaliSend_StartTime(TIME_TE);
+     Dali_StartTimer(TIME_TE);
     break;
     
   case E_Dali_TimeOut:
     ForwardFrame.Sent ++;
     ForwardFrame.Data <<= 1;
-    if (ForwardFrame.ToSend !=  ForwardFrame.Sent)
+    if (ForwardFrame.ToSend !=  ForwardFrame.Sent)  // 发送下一位
     {
       STATE_TO(DaliSend_SendFirstHalf);
     }
-    else
+    else        /// 发送结束
     {
       STATE_TO(DaliSend_SendEnd);
     }
     break;
     
   case E_EXIT:
-    DaliSend_StopTime();
+    Dali_StopTimer();
     break;
   }
 }
@@ -154,86 +214,148 @@ void DaliSend_SendEnd(tEvent *e)
 {
   switch(e->Id)
   {
-  case E_ENTRY:
-    DALI_PIN_OUT_HIGH();
+  case E_ENTRY:   // 发送停止位
+     DALI_PIN_OUT_HIGH();
     
-     DaliSend_StartTime(TIME_TE * 4);
+     Dali_StartTimer(TIME_TE * 4);
     break;
     
-  case E_Dali_TimeOut:
+  case E_Dali_TimeOut:   // 停止位发送完成
     STATE_TO(DALI_IDLE);
     break;
     
   case E_EXIT:
-    DaliSend_StopTime();
+    Dali_StopTimer();
     break;
   }
 }
 
 
-void DaliRecv_Idle(tEvent *e)
+void DaliRecv_WaitStart(tEvent *e)
 {
   switch(e->Id)
   {
   case E_ENTRY:
+    // forward 到 backward之间， 22TE
+    Dali_StartTimer(TIME_TE * 22);  
+    // input ISR
+    Enable_InputISR();
     break;
     
-  case E_Dali_Recv:
-    STATE_TO(DaliRecv_Start);
+  case E_Dali_Received:                   // 等到了数据，转到等待结束状态
+    STATE_TO(DaliRecv_WaitFinish);
     break;
-    
-  case E_EXIT:
-    break;
-  }
-}
-void DaliRecv_Start(tEvent *e)
-{
-  switch(e->Id)
-  {
-  case E_ENTRY:
-    break;
-    
-  case E_EXIT:
-    break;
-  }
-}
-void DaliRecv_RecvFirstHalf(tEvent *e)
-{
-  switch(e->Id)
-  {
-  case E_ENTRY:
+
+  case E_Dali_TimeOut:           // 超时没有等到 数据
+    // 禁止input ISR
+    Disable_InputISR();
+    thisBackwardFrame.Valid = 0;
+    STATE_TO(Dali_Idle);
     break;
     
   case E_EXIT:
-    break;
-  }
-}
-void DaliRecv_RecvSecondHalf(tEvent *e)
-{
-  switch(e->Id)
-  {
-  case E_ENTRY:
-    break;
-    
-  case E_EXIT:
+    Dali_StopTimer();
     break;
   }
 }
 
-typedef enum
+void Dali_InitBackFrame(void)
 {
-  DALI_RECV_ERROR,
-  DALI_RECV_OK,
-};
+  thisBackwardFrame.Data = 0;
+  thisBackwardFrame.Valid = 0;
+  thisBackwardFrame.Received = 0;
+}
+void DaliRecv_WaitFinish(tEvent *e)
+{
+  switch(e->Id)
+  {
+  case E_ENTRY:
+    Dali_StartTimer(TIME_TE * 22);  // backward帧最多22个TE
+    LastTime = 0;
+    Dali_InitBackFrame();
+    break;
+    
+  case E_Dali_TimeOut:           // 超时，完成接收数据
+    // 检查是否还有剩余位，如果，肯定是 1
+    if (thisBackwardFrame.Halfbits == 1)
+    {
+      thisBackwardFrame.Bits <<= 1;
+      thisBackwardFrame.Bits |= 1;
+      if ( DALI_RECV_OK == GetOneBit(thisBackwardFrame.Bits))
+      {
+        thisBackwardFrame.Halfbits = 0;
+      }
+    }
+    // 通知上层
+    DaliMaster_GetData(&thisBackwardFrame);
+    // 禁止input ISR
+    Disable_InputISR();
+    // 转到空闲状态
+    STATE_TO(Dali_Idle);
+    break;
+    
+  case E_EXIT:
+    Dali_StopTimer();
+    break;
+  }
+}
+
+// dali作为slave，或者多主机模式
+void Dali_Monitor(tEvent *e)
+{
+  switch(e->Id)
+  {
+  case E_ENTRY:
+    Dali_StartTimer(TIME_TE * 22);  // backward帧最多22个TE
+    break;
+    
+  case E_Dali_TimeOut:           // 超时，完成接收数据
+    STATE_TO(Dali_Idle);
+    break;
+    
+  case E_Dali_Received:
+    Dali_StartTimer(TIME_TE * 22);
+    break;
+    
+  case E_EXIT:
+    Dali_StopTimer();
+    break;
+  }  
+}
+
+// 
+void Enable_InputISR()
+{
+}
+//
+void Disable_InputISR(void)
+{
+  
+}
+
+interrupt void DaliInputISR(void)
+{
+  tEvent e;
+  
+  e.Id = E_Dali_Received;
+  
+  Dali_DispEvent(e);  
+  
+  if (DALI_RECV_OK == Receive())
+  {    
+  }
+
+  
+}
 
 uint8_t GetOneBit(uint8_t Data)
 {
-  if (Data == 0x01)   ///  上升沿， 为 1
+  if ((Data & 0x03) == 0x01)   ///  上升沿， 为 1
   {
     thisBackwardFrame.Data << = 1;
-    thisBackwardFrame。Data |= 1;
+    thisBackwardFrame.Data |= 1;
   }
-  else (Data == 0x02)
+  else ((Data & 0x03) == 0x02)   /// 下降沿， 为 0
   {
     thisBackwardFrame.Data << = 1;
   }
@@ -245,79 +367,63 @@ uint8_t GetOneBit(uint8_t Data)
   return DALI_RECV_OK;
 }
 
-interrupt void DaliTimer(void)
-{
-  // 在发送模式
-  if (subDaliStatus == DALI_INSEND)
-  {  
-  }
-  
-  // 在接收模式
-  else if (subDaliStatus == DALI_INRECV)
-  {
-    // 在接收模式下，定时中断产生，说明dali超时，出错了
-  }
-}
-interrupt void DaliInputISR(void)
-{
 
-  if (DALI_RECV_OK == Receive())
-  {
-    // diable input 
-    // diable timer 
-    //  notify dali 上层控制
-    
-  }
-  
-}
+
 
 uint8_t Receive(void)
 {
-  uint8_t halfbits = 0, bits;
-  uint8_t pin;
-  uint32_t  timePass;
+  static uint8_t 
+  static uint8_t pin;
+  uint32_t  now, timeInterval;
   
-  if (timeInited == 0)
+  // 第一位，特殊处理
+  if (LastTime == 0)
   {
-    timeInited = 1;
-    //在中断里，设置定时器中断时间要50 TE, 大于22TE
-    // DaliTimerReset(50TE)
+    LastTime = 1;    
+    
+    thisBackwardFrame.Halfbits = 0;
+    
+    thisBackwardFrame.Bits = 0;
+
     pin = DALI_PIN_IN();
+    
     return DALI_RECV_OK;
   }
   
-  timePass = getTime();
+  now = getTime();
+  timeInterval = now - LastTime;
+  LastTime = now;
   
-  if (timePass < (TIME_TE * 0.9))  // 太小脉宽，错误信号
+  if (timeInterval < (uint32_t)(TIME_TE * 0.9))  // 太小脉宽，错误信号
   {
     return DALI_RECV_ERROR;
   }
-  else if (timePass < (TIME_TE * 1.1))  // 半位
+  else if (timeInterval < (uint32_t)(TIME_TE * 1.1))  // 半位
   {
-    bit << = 1;
-    bit |= pin;
-    halfbit ++;
+    thisBackwardFrame.Bits << = 1;
+    thisBackwardFrame.Bits |= pin;                    // 确认上一个半位
+    thisBackwardFrame.Halfbits ++;
     pin = DALI_PIN_IN();
   }
-  else if (timePass < (TIME_TE * 2.2))  // 两个半位
+  else if (timeInterval < (uint32_t)(TIME_TE * 2.2))  // 两个半位
   {
-    bit <<= 1;
-    bit |= pin;
-    bit <<= 1;
-    bit |= pin;    
-    halfbits += 2;
-    pin = DALI_PIN_IN();
+    thisBackwardFrame.Bits <<= 1;
+    thisBackwardFrame.Bits |= pin;
+    thisBackwardFrame.Bits <<= 1;
+    thisBackwardFrame.Bits |= pin;    
+    thisBackwardFrame.Halfbits += 2;
+    pin = DALI_PIN_IN();              // 记下当前位状态
   }
   else                                  // 太大脉宽，错误信号
   {
     return DALI_RECV_ERROR;
   }
   
-  if (halfbits == 2)  
+  if (thisBackwardFrame.Halfbits == 2)  
   {
-    if ( DALI_RECV_OK == GetOneBit(bits))
+    if ( DALI_RECV_OK == GetOneBit(thisBackwardFrame.Bits))
     {
-      halfbits = 0;
+      thisBackwardFrame.Halfbits = 0;
     }
     else
     {
@@ -326,18 +432,15 @@ uint8_t Receive(void)
   }
   else if (halfbits == 3)
   {
-    if ( DALI_RECV_OK == GetOneBit(bits >> 1))
+    if ( DALI_RECV_OK == GetOneBit(thisBackwardFrame.Bits >> 1))
     {
-      halfbits = 1;
+      thisBackwardFrame.Halfbits = 1;
     }
     else
     {
       return DALI_RECV_ERROR；
     }
   }
-  
-  //在中断里，设置定时器中断时间要50 TE, 大于22TE
-  // DaliTimerReset(50TE)
   
   return DALI_RECV_OK;
   
